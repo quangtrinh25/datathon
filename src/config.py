@@ -111,6 +111,23 @@ RATIO_BLEND = {
     "specialist": 0.25,
 }
 
+DIRECT_BLEND = {
+    "lgb": 0.6,
+    "ridge": 0.4,
+    "specialist": 0.6,
+}
+
+ALLOCATION_BLEND = {
+    "revenue": 0.6,
+    "cogs": 0.4,
+}
+
 SPECIALIST_MIN_ROWS = 180
+DIRECT_SPECIALIST_BOOST = 2.0
+HIGH_ERA_START = 2014
+HIGH_ERA_END = 2018
+HIGH_ERA_WEIGHT = 1.0
+BASE_ERA_WEIGHT = 0.01
 RATIO_CLIP = (0.65, 1.30)
-CALIBRATION_GRID = tuple(round(x, 3) for x in [0.90 + i * 0.01 for i in range(21)])
+CALIBRATION_GRID = tuple(round(x, 3) for x in [0.90 + i * 0.01 for i in range(41)])
+CALIBRATION_MIN_SEGMENT_ROWS = 45

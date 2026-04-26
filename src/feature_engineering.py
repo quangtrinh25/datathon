@@ -23,6 +23,17 @@ def _make_fourier(date_series: pd.Series, period: float, order: int, prefix: str
     return pd.DataFrame(values, index=date_series.index)
 
 
+def _make_position_fourier(position: pd.Series, period: pd.Series | float, order: int, prefix: str) -> pd.DataFrame:
+    values: dict[str, np.ndarray] = {}
+    base = position.astype(float).to_numpy()
+    denom = period.astype(float).to_numpy() if isinstance(period, pd.Series) else float(period)
+    for n in range(1, order + 1):
+        angle = 2 * np.pi * n * base / denom
+        values[f"{prefix}_sin_{n}"] = np.sin(angle)
+        values[f"{prefix}_cos_{n}"] = np.cos(angle)
+    return pd.DataFrame(values, index=position.index)
+
+
 @dataclass
 class FeatureBuilder:
     history_end: pd.Timestamp | None = None
@@ -124,9 +135,6 @@ class FeatureBuilder:
         )
         frame["promo_tet_pressure"] = frame["promo_weighted_discount"] * frame["is_tet_window_14"]
 
-        fourier = _make_fourier(frame["Date"], period=365.25, order=3, prefix="yearly")
-        frame = pd.concat([frame, fourier], axis=1)
-
         self.static_feature_columns = [column for column in frame.columns if column != "Date"]
         return frame
 
@@ -186,9 +194,11 @@ class FeatureBuilder:
         frame["year"] = frame["Date"].dt.year
         frame["quarter"] = frame["Date"].dt.quarter
         frame["month"] = frame["Date"].dt.month
+        frame["month_of_quarter"] = ((frame["month"] - 1) % 3) + 1
         frame["week"] = frame["Date"].dt.isocalendar().week.astype(int)
         frame["dow"] = frame["Date"].dt.dayofweek
         frame["day"] = frame["Date"].dt.day
+        frame["doy"] = frame["Date"].dt.dayofyear
         frame["days_in_month"] = frame["Date"].dt.days_in_month
         frame["days_to_month_end"] = _month_end_day(frame["Date"])
         frame["days_from_month_start"] = frame["Date"].dt.day - 1
@@ -196,11 +206,29 @@ class FeatureBuilder:
         frame["is_weekend"] = frame["dow"].isin([5, 6]).astype(float)
         frame["is_month_start"] = (frame["day"] == 1).astype(float)
         frame["is_month_end"] = (frame["days_to_month_end"] == 0).astype(float)
+        frame["is_first_1"] = (frame["day"] == 1).astype(float)
+        frame["is_first_2"] = (frame["day"] <= 2).astype(float)
         frame["is_first_3_days"] = (frame["day"] <= 3).astype(float)
+        frame["is_last_1"] = (frame["days_to_month_end"] == 0).astype(float)
+        frame["is_last_2"] = (frame["days_to_month_end"] <= 1).astype(float)
         frame["is_last_3_days"] = (frame["days_to_month_end"] <= 2).astype(float)
         frame["is_pay_cycle_window"] = (
             frame["is_first_3_days"] + frame["is_last_3_days"]
         ).clip(0, 1)
+        frame["t_days"] = (frame["Date"] - pd.Timestamp("2020-01-01")).dt.days.astype(float)
+        frame["t_years"] = frame["t_days"] / 365.25
+        frame["regime_pre2019"] = (frame["year"] <= 2018).astype(float)
+        frame["regime_2019"] = (frame["year"] == 2019).astype(float)
+        frame["regime_post2019"] = (frame["year"] >= 2020).astype(float)
+        frame["is_odd_year"] = (frame["year"] % 2 == 1).astype(float)
+
+        quarter_period = frame["Date"].dt.to_period("Q")
+        quarter_start = quarter_period.dt.start_time
+        quarter_end = quarter_period.dt.end_time.dt.normalize()
+        frame["day_of_quarter"] = (frame["Date"] - quarter_start).dt.days + 1
+        frame["days_in_quarter"] = (quarter_end - quarter_start).dt.days + 1
+        frame["days_to_quarter_end"] = frame["days_in_quarter"] - frame["day_of_quarter"]
+        frame["week_of_quarter"] = ((frame["day_of_quarter"] - 1) // 7) + 1
 
         for name, (month, day) in VN_FIXED_HOLIDAYS.items():
             frame[f"holiday_{name}"] = ((frame["month"] == month) & (frame["day"] == day)).astype(float)
@@ -209,6 +237,9 @@ class FeatureBuilder:
         frame["days_from_tet"] = 0.0
         frame["is_tet_window_14"] = 0.0
         frame["is_post_tet_7"] = 0.0
+        frame["tet_before_7"] = 0.0
+        frame["tet_after_7"] = 0.0
+        frame["tet_on"] = 0.0
         for index, date in frame["Date"].items():
             tet = pd.Timestamp(TET_DATES.get(int(date.year), TET_DATES[max(TET_DATES)]))
             delta = (date - tet).days
@@ -216,4 +247,26 @@ class FeatureBuilder:
             frame.at[index, "days_from_tet"] = float(max(-40, min(40, delta)))
             frame.at[index, "is_tet_window_14"] = float(abs(delta) <= 14)
             frame.at[index, "is_post_tet_7"] = float(0 <= delta <= 7)
+            frame.at[index, "tet_before_7"] = float(-7 <= delta < 0)
+            frame.at[index, "tet_after_7"] = float(0 < delta <= 7)
+            frame.at[index, "tet_on"] = float(delta == 0)
+
+        frame["holiday_black_friday"] = 0.0
+        november_mask = frame["month"] == 11
+        if november_mask.any():
+            november_dates = frame.loc[november_mask, "Date"]
+            last_days = november_dates + pd.offsets.MonthEnd(0)
+            last_fridays = last_days - pd.to_timedelta((last_days.dt.dayofweek - 4) % 7, unit="D")
+            frame.loc[november_mask, "holiday_black_friday"] = (november_dates == last_fridays).astype(float)
+
+        yearly = _make_fourier(frame["Date"], period=365.25, order=5, prefix="yearly")
+        weekly = _make_position_fourier(frame["dow"], period=7.0, order=2, prefix="weekly")
+        monthly = _make_position_fourier(frame["day"] - 1, period=frame["days_in_month"], order=2, prefix="monthly_pos")
+        quarterly = _make_position_fourier(
+            frame["day_of_quarter"] - 1,
+            period=frame["days_in_quarter"],
+            order=2,
+            prefix="quarterly_pos",
+        )
+        frame = pd.concat([frame, yearly, weekly, monthly, quarterly], axis=1)
         return frame

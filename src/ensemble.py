@@ -28,3 +28,29 @@ class ForecastEnsemble:
             base[valid] = (1.0 - weight) * base[valid] + weight * specialist_pred[valid]
         return base
 
+
+@dataclass
+class QuarterBlendedEnsemble:
+    lgb_model: object
+    ridge_model: object
+    specialist_models: dict[int, object]
+    base_weights: dict[str, float]
+
+    def predict(self, X) -> np.ndarray:
+        lgb_pred = self.lgb_model.predict(X)
+        ridge_pred = self.ridge_model.predict(X)
+        base = self.base_weights["lgb"] * lgb_pred + self.base_weights["ridge"] * ridge_pred
+
+        if not self.specialist_models:
+            return base
+
+        blended = base.copy()
+        quarter_values = X["quarter"].astype(int).to_numpy()
+        weight = self.base_weights["specialist"]
+        for quarter, model in self.specialist_models.items():
+            mask = quarter_values == int(quarter)
+            if not mask.any():
+                continue
+            specialist_pred = model.predict(X.loc[mask])
+            blended[mask] = (1.0 - weight) * base[mask] + weight * specialist_pred
+        return blended

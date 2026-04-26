@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Iterable
 
 import numpy as np
 import pandas as pd
 
 from src.config import DATA_RAW, FORECAST_END, TRAIN_END, TRAIN_START
+
+
+def _canonical_promo_name(name: str) -> str:
+    normalized = re.sub(r"\s+\d{4}$", "", str(name).strip()).lower()
+    normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+    aliases = {
+        "mid_year_sale": "mid_year",
+        "year_end_sale": "year_end",
+    }
+    return aliases.get(normalized, normalized)
 
 
 def load_sales() -> pd.DataFrame:
@@ -32,6 +43,7 @@ def load_promotions() -> pd.DataFrame:
     promotions["applicable_category"] = (
         promotions["applicable_category"].fillna("ALL").replace({"nan": "ALL"})
     )
+    promotions["promo_family"] = promotions["promo_name"].map(_canonical_promo_name)
     return promotions
 
 
@@ -65,7 +77,7 @@ def infer_recurring_promotions(
     promotions = load_promotions()
     prototypes: list[dict[str, object]] = []
 
-    for promo_name, group in promotions.groupby("promo_name", sort=False):
+    for promo_family, group in promotions.groupby("promo_family", sort=False):
         years = sorted(group["start_date"].dt.year.unique().tolist())
         odd_year_only = all(year % 2 == 1 for year in years)
         start_month = int(group["start_date"].dt.month.mode().iloc[0])
@@ -73,7 +85,7 @@ def infer_recurring_promotions(
         duration_days = int(round(group["duration_days"].median()))
         prototypes.append(
             {
-                "promo_name": promo_name,
+                "promo_name": str(promo_family),
                 "start_month": start_month,
                 "start_day": start_day,
                 "duration_days": duration_days,
@@ -122,6 +134,17 @@ def build_daily_promo_features(
     history_end: pd.Timestamp,
 ) -> pd.DataFrame:
     date_frame = pd.DataFrame({"Date": pd.to_datetime(pd.Index(dates))}).sort_values("Date")
+    promo_families = sorted(load_promotions()["promo_family"].dropna().unique().tolist())
+    per_promo_columns = [
+        column
+        for promo_family in promo_families
+        for column in (
+            f"promo_{promo_family}",
+            f"promo_{promo_family}_since",
+            f"promo_{promo_family}_until",
+            f"promo_{promo_family}_disc",
+        )
+    ]
     category_weights = estimate_category_weights(history_end)
     promo_calendar = infer_recurring_promotions(date_frame["Date"].min(), pd.Timestamp(FORECAST_END))
     promo_calendar = promo_calendar.loc[promo_calendar["Date"].isin(date_frame["Date"])]
@@ -129,6 +152,8 @@ def build_daily_promo_features(
     if promo_calendar.empty:
         empty = date_frame.copy()
         empty["promo_active"] = 0.0
+        for column in per_promo_columns:
+            empty[column] = 0.0
         return empty
 
     category_map = {
@@ -147,6 +172,26 @@ def build_daily_promo_features(
 
     for channel in ["all_channels", "email", "in_store", "online", "social_media"]:
         promo_calendar[f"channel_{channel}"] = (promo_calendar["promo_channel"] == channel).astype(float)
+
+    promo_feature_frames: list[pd.DataFrame] = []
+    for promo_name, promo_group in promo_calendar.groupby("promo_name", sort=False):
+        promo_feature_frames.append(
+            promo_group.groupby("Date", as_index=False)
+            .agg(
+                active=("promo_name", "size"),
+                days_since_start=("days_since_start", "mean"),
+                days_to_end=("days_to_end", "mean"),
+                discount_value=("discount_value", "mean"),
+            )
+            .rename(
+                columns={
+                    "active": f"promo_{promo_name}",
+                    "days_since_start": f"promo_{promo_name}_since",
+                    "days_to_end": f"promo_{promo_name}_until",
+                    "discount_value": f"promo_{promo_name}_disc",
+                }
+            )
+        )
 
     grouped = (
         promo_calendar.groupby("Date", as_index=False)
@@ -170,7 +215,13 @@ def build_daily_promo_features(
             channel_social_media=("channel_social_media", "sum"),
         )
     )
-    return date_frame.merge(grouped, on="Date", how="left").fillna(0.0)
+    features = date_frame.merge(grouped, on="Date", how="left")
+    for promo_frame in promo_feature_frames:
+        features = features.merge(promo_frame, on="Date", how="left")
+    for column in per_promo_columns:
+        if column not in features.columns:
+            features[column] = 0.0
+    return features.fillna(0.0)
 
 
 def build_aux_daily_observations() -> pd.DataFrame:
