@@ -1,0 +1,101 @@
+{
+  "fold_metrics_mean": {
+    "revenue_mae": 603730.1156025351,
+    "revenue_rmse": 834156.9357436086,
+    "revenue_r2": 0.7471172593039541,
+    "cogs_mae": 570510.8055851193,
+    "cogs_rmse": 781986.087849815,
+    "cogs_r2": 0.7117171932821736,
+    "boundary_revenue_mae": 960019.4260191546
+  },
+  "calibration": {
+    "revenue_scalar": 1.1,
+    "cogs_scalar": 1.1
+  },
+  "revenue_top_features": [
+    {
+      "feature": "template_revenue_doy",
+      "importance": 1407
+    },
+    {
+      "feature": "revenue_lag_1",
+      "importance": 1248
+    },
+    {
+      "feature": "revenue_lag_364",
+      "importance": 1034
+    },
+    {
+      "feature": "revenue_lag_56",
+      "importance": 970
+    },
+    {
+      "feature": "ratio_lag_364",
+      "importance": 957
+    },
+    {
+      "feature": "revenue_lag_7",
+      "importance": 942
+    },
+    {
+      "feature": "revenue_lag_182",
+      "importance": 904
+    },
+    {
+      "feature": "revenue_lag_91",
+      "importance": 896
+    },
+    {
+      "feature": "ratio_lag_1",
+      "importance": 871
+    },
+    {
+      "feature": "ratio_lag_91",
+      "importance": 829
+    }
+  ],
+  "ratio_top_features": [
+    {
+      "feature": "template_ratio_doy",
+      "importance": 658
+    },
+    {
+      "feature": "ratio_lag_1",
+      "importance": 536
+    },
+    {
+      "feature": "revenue_lag_91",
+      "importance": 347
+    },
+    {
+      "feature": "year",
+      "importance": 346
+    },
+    {
+      "feature": "ratio_lag_91",
+      "importance": 339
+    },
+    {
+      "feature": "revenue_lag_182",
+      "importance": 327
+    },
+    {
+      "feature": "ratio_lag_14",
+      "importance": 306
+    },
+    {
+      "feature": "revenue_lag_364",
+      "importance": 299
+    },
+    {
+      "feature": "revenue_lag_1",
+      "importance": 284
+    },
+    {
+      "feature": "ratio_lag_56",
+      "importance": 269
+    }
+  ],
+  "submission_path": "/home/milis/datathon/outputs/submissions/submission.csv",
+  "model_path": "/home/milis/datathon/outputs/models/forecast_pipeline.joblib"
+}
