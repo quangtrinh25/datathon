@@ -110,10 +110,20 @@ class ForecastPipeline:
             cogs_pred = cogs_anchor
             if self.revenue_allocation_ensemble is not None:
                 revenue_share = self.revenue_allocation_ensemble.predict(feature_frame)
-                revenue_pred = self._blend_with_allocation_head(static_future, revenue_anchor, revenue_share, "revenue")
+                revenue_pred = self._blend_with_allocation_head(
+                    static_future,
+                    revenue_anchor,
+                    revenue_share,
+                    "revenue",
+                )
             if self.cogs_allocation_ensemble is not None:
                 cogs_share = self.cogs_allocation_ensemble.predict(feature_frame)
-                cogs_pred = self._blend_with_allocation_head(static_future, cogs_anchor, cogs_share, "cogs")
+                cogs_pred = self._blend_with_allocation_head(
+                    static_future,
+                    cogs_anchor,
+                    cogs_share,
+                    "cogs",
+                )
             ratio_pred = np.divide(
                 cogs_pred,
                 np.clip(revenue_pred, a_min=1.0, a_max=None),
@@ -191,25 +201,7 @@ class ForecastPipeline:
         X = train_frame[self.static_feature_columns]
         y = train_frame[target_column]
         weights = self._direct_sample_weights(train_frame)
-        lgb_model = LightGBMForecaster(params=REVENUE_LGB_PARAMS).fit(X, y, sample_weight=weights)
-        ridge_model = RidgeForecaster(alpha=RIDGE_ALPHA).fit(X, y)
-
-        specialist_models: dict[int, LightGBMForecaster] = {}
-        for quarter in [1, 2, 3, 4]:
-            quarter_weights = weights.copy()
-            quarter_weights[train_frame["quarter"].to_numpy() == quarter] *= DIRECT_SPECIALIST_BOOST
-            specialist_models[quarter] = LightGBMForecaster(params=REVENUE_LGB_PARAMS).fit(
-                X,
-                y,
-                sample_weight=quarter_weights,
-            )
-
-        return QuarterBlendedEnsemble(
-            lgb_model=lgb_model,
-            ridge_model=ridge_model,
-            specialist_models=specialist_models,
-            base_weights=DIRECT_BLEND,
-        )
+        return self._fit_static_quarter_ensemble(X, y, train_frame, weights)
 
     def _fit_direct_allocation_models(self, train_frame: pd.DataFrame, target_column: str) -> QuarterBlendedEnsemble:
         if self.static_feature_columns is None:
@@ -218,12 +210,21 @@ class ForecastPipeline:
         X = train_frame[self.static_feature_columns]
         y = self._quarter_share_target(train_frame, target_column)
         weights = self._direct_sample_weights(train_frame)
-        lgb_model = LightGBMForecaster(params=REVENUE_LGB_PARAMS).fit(X, y, sample_weight=weights)
+        return self._fit_static_quarter_ensemble(X, y, train_frame, weights)
+
+    def _fit_static_quarter_ensemble(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        train_frame: pd.DataFrame,
+        sample_weight: np.ndarray,
+    ) -> QuarterBlendedEnsemble:
+        lgb_model = LightGBMForecaster(params=REVENUE_LGB_PARAMS).fit(X, y, sample_weight=sample_weight)
         ridge_model = RidgeForecaster(alpha=RIDGE_ALPHA).fit(X, y)
 
         specialist_models: dict[int, LightGBMForecaster] = {}
         for quarter in [1, 2, 3, 4]:
-            quarter_weights = weights.copy()
+            quarter_weights = sample_weight.copy()
             quarter_weights[train_frame["quarter"].to_numpy() == quarter] *= DIRECT_SPECIALIST_BOOST
             specialist_models[quarter] = LightGBMForecaster(params=REVENUE_LGB_PARAMS).fit(
                 X,
