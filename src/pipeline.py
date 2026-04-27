@@ -11,8 +11,12 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from src.calibration import apply_calibration, calibrate_from_cv
 from src.config import (
     ALLOCATION_BLEND,
+    ALLOCATION_LGB_PARAMS,
+    ALLOCATION_XGB_PARAMS,
     BASE_ERA_WEIGHT,
+    COGS_SHARE_XGB_PARAMS,
     DATA_PROCESSED,
+    DIRECT_LGB_PARAMS,
     DIRECT_BLEND,
     DIRECT_SPECIALIST_BOOST,
     HIGH_ERA_END,
@@ -23,8 +27,8 @@ from src.config import (
     RATIO_CLIP,
     RATIO_LGB_PARAMS,
     REPORTS_DIR,
+    REVENUE_SHARE_XGB_PARAMS,
     REVENUE_BLEND,
-    REVENUE_LGB_PARAMS,
     RIDGE_ALPHA,
     SUBMISSIONS_DIR,
 )
@@ -35,6 +39,7 @@ from src.feature_engineering import FeatureBuilder
 from src.models.lgb_model import LightGBMForecaster
 from src.models.q_specialists import BoundarySpecialistForecaster
 from src.models.ridge_model import RidgeForecaster
+from src.models.xgb_model import XGBoostForecaster
 from src.validators import TimeFold, iter_folds
 
 
@@ -50,6 +55,14 @@ def compute_metrics(actual: pd.Series, predicted: pd.Series) -> dict[str, float]
 class ForecastPipeline:
     use_aux_templates: bool = True
     use_specialist: bool = True
+    direct_lgb_params: dict | None = None
+    allocation_lgb_params: dict | None = None
+    allocation_xgb_params: dict | None = None
+    revenue_share_xgb_params: dict | None = None
+    cogs_share_xgb_params: dict | None = None
+    allocation_model_type: str = "lightgbm"
+    direct_blend: dict[str, float] | None = None
+    allocation_blend: dict[str, float] | None = None
     feature_builder: FeatureBuilder | None = None
     revenue_ensemble: ForecastEnsemble | None = None
     ratio_ensemble: ForecastEnsemble | None = None
@@ -114,7 +127,7 @@ class ForecastPipeline:
                     static_future,
                     revenue_anchor,
                     revenue_share,
-                    "revenue",
+                    float(self._allocation_blend()["revenue"]),
                 )
             if self.cogs_allocation_ensemble is not None:
                 cogs_share = self.cogs_allocation_ensemble.predict(feature_frame)
@@ -122,7 +135,7 @@ class ForecastPipeline:
                     static_future,
                     cogs_anchor,
                     cogs_share,
-                    "cogs",
+                    float(self._allocation_blend()["cogs"]),
                 )
             ratio_pred = np.divide(
                 cogs_pred,
@@ -201,7 +214,15 @@ class ForecastPipeline:
         X = train_frame[self.static_feature_columns]
         y = train_frame[target_column]
         weights = self._direct_sample_weights(train_frame)
-        return self._fit_static_quarter_ensemble(X, y, train_frame, weights)
+        return self._fit_static_quarter_ensemble(
+            X,
+            y,
+            train_frame,
+            weights,
+            model_type="lightgbm",
+            model_params=self._direct_lgb_params(),
+            base_weights=self._direct_blend(),
+        )
 
     def _fit_direct_allocation_models(self, train_frame: pd.DataFrame, target_column: str) -> QuarterBlendedEnsemble:
         if self.static_feature_columns is None:
@@ -210,7 +231,15 @@ class ForecastPipeline:
         X = train_frame[self.static_feature_columns]
         y = self._quarter_share_target(train_frame, target_column)
         weights = self._direct_sample_weights(train_frame)
-        return self._fit_static_quarter_ensemble(X, y, train_frame, weights)
+        return self._fit_static_quarter_ensemble(
+            X,
+            y,
+            train_frame,
+            weights,
+            model_type=self.allocation_model_type,
+            model_params=self._allocation_model_params(target_column),
+            base_weights=self._direct_blend(),
+        )
 
     def _fit_static_quarter_ensemble(
         self,
@@ -218,15 +247,19 @@ class ForecastPipeline:
         y: pd.Series,
         train_frame: pd.DataFrame,
         sample_weight: np.ndarray,
+        model_type: str,
+        model_params: dict,
+        base_weights: dict[str, float],
     ) -> QuarterBlendedEnsemble:
-        lgb_model = LightGBMForecaster(params=REVENUE_LGB_PARAMS).fit(X, y, sample_weight=sample_weight)
+        model_factory = self._model_factory(model_type)
+        lgb_model = model_factory(params=model_params).fit(X, y, sample_weight=sample_weight)
         ridge_model = RidgeForecaster(alpha=RIDGE_ALPHA).fit(X, y)
 
-        specialist_models: dict[int, LightGBMForecaster] = {}
+        specialist_models: dict[int, object] = {}
         for quarter in [1, 2, 3, 4]:
             quarter_weights = sample_weight.copy()
             quarter_weights[train_frame["quarter"].to_numpy() == quarter] *= DIRECT_SPECIALIST_BOOST
-            specialist_models[quarter] = LightGBMForecaster(params=REVENUE_LGB_PARAMS).fit(
+            specialist_models[quarter] = model_factory(params=model_params).fit(
                 X,
                 y,
                 sample_weight=quarter_weights,
@@ -236,7 +269,7 @@ class ForecastPipeline:
             lgb_model=lgb_model,
             ridge_model=ridge_model,
             specialist_models=specialist_models,
-            base_weights=DIRECT_BLEND,
+            base_weights=base_weights,
         )
 
     @staticmethod
@@ -265,7 +298,7 @@ class ForecastPipeline:
         future_frame: pd.DataFrame,
         anchor_pred: np.ndarray,
         share_pred: np.ndarray,
-        target_name: str,
+        blend_weight: float,
     ) -> np.ndarray:
         group_keys = [future_frame["year"], future_frame["quarter"]]
         anchor_series = pd.Series(anchor_pred, index=future_frame.index, dtype=float)
@@ -278,23 +311,80 @@ class ForecastPipeline:
         normalized_share = normalized_share.fillna(anchor_share).fillna(0.0)
 
         allocation_pred = anchor_total * normalized_share
-        blend_weight = float(ALLOCATION_BLEND[target_name])
         blended = (1.0 - blend_weight) * anchor_series + blend_weight * allocation_pred
         return blended.to_numpy()
 
+    def _direct_lgb_params(self) -> dict:
+        return dict(DIRECT_LGB_PARAMS if self.direct_lgb_params is None else self.direct_lgb_params)
 
-def run_backtest(use_aux_templates: bool = True, use_specialist: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
+    def _allocation_lgb_params(self) -> dict:
+        return dict(ALLOCATION_LGB_PARAMS if self.allocation_lgb_params is None else self.allocation_lgb_params)
+
+    def _allocation_xgb_params(self) -> dict:
+        return dict(ALLOCATION_XGB_PARAMS if self.allocation_xgb_params is None else self.allocation_xgb_params)
+
+    def _revenue_share_xgb_params(self) -> dict:
+        return dict(REVENUE_SHARE_XGB_PARAMS if self.revenue_share_xgb_params is None else self.revenue_share_xgb_params)
+
+    def _cogs_share_xgb_params(self) -> dict:
+        return dict(COGS_SHARE_XGB_PARAMS if self.cogs_share_xgb_params is None else self.cogs_share_xgb_params)
+
+    def _allocation_model_params(self, target_column: str) -> dict:
+        if self.allocation_model_type == "xgboost":
+            if target_column == "Revenue":
+                return self._revenue_share_xgb_params()
+            if target_column == "COGS":
+                return self._cogs_share_xgb_params()
+            return self._allocation_xgb_params()
+        return self._allocation_lgb_params()
+
+    def _direct_blend(self) -> dict[str, float]:
+        return dict(DIRECT_BLEND if self.direct_blend is None else self.direct_blend)
+
+    def _allocation_blend(self) -> dict[str, float]:
+        return dict(ALLOCATION_BLEND if self.allocation_blend is None else self.allocation_blend)
+
+    @staticmethod
+    def _model_factory(model_type: str):
+        if model_type == "xgboost":
+            return XGBoostForecaster
+        return LightGBMForecaster
+
+
+def run_backtest(
+    use_aux_templates: bool = True,
+    use_specialist: bool = True,
+    direct_lgb_params: dict | None = None,
+    allocation_lgb_params: dict | None = None,
+    allocation_xgb_params: dict | None = None,
+    revenue_share_xgb_params: dict | None = None,
+    cogs_share_xgb_params: dict | None = None,
+    allocation_model_type: str = "lightgbm",
+    direct_blend: dict[str, float] | None = None,
+    allocation_blend: dict[str, float] | None = None,
+    fold_names: set[str] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     sales = load_sales()
     fold_rows: list[dict[str, object]] = []
     prediction_frames: list[pd.DataFrame] = []
 
     for fold in iter_folds():
+        if fold_names is not None and fold.name not in fold_names:
+            continue
         train_sales = sales.loc[sales["Date"] <= fold.train_end].reset_index(drop=True)
         val_sales = sales.loc[(sales["Date"] >= fold.val_start) & (sales["Date"] <= fold.val_end)].reset_index(drop=True)
 
         pipeline = ForecastPipeline(
             use_aux_templates=use_aux_templates,
             use_specialist=use_specialist,
+            direct_lgb_params=direct_lgb_params,
+            allocation_lgb_params=allocation_lgb_params,
+            allocation_xgb_params=allocation_xgb_params,
+            revenue_share_xgb_params=revenue_share_xgb_params,
+            cogs_share_xgb_params=cogs_share_xgb_params,
+            allocation_model_type=allocation_model_type,
+            direct_blend=direct_blend,
+            allocation_blend=allocation_blend,
         ).fit(train_sales)
         pred = pipeline.predict(val_sales[["Date"]])
         merged = val_sales.merge(pred, on="Date", how="left")
@@ -357,10 +447,29 @@ def summarize_cv_predictions(
     return pd.DataFrame(fold_rows)
 
 
-def fit_final_pipeline(use_aux_templates: bool = True, use_specialist: bool = True) -> ForecastPipeline:
+def fit_final_pipeline(
+    use_aux_templates: bool = True,
+    use_specialist: bool = True,
+    direct_lgb_params: dict | None = None,
+    allocation_lgb_params: dict | None = None,
+    allocation_xgb_params: dict | None = None,
+    revenue_share_xgb_params: dict | None = None,
+    cogs_share_xgb_params: dict | None = None,
+    allocation_model_type: str = "lightgbm",
+    direct_blend: dict[str, float] | None = None,
+    allocation_blend: dict[str, float] | None = None,
+) -> ForecastPipeline:
     return ForecastPipeline(
         use_aux_templates=use_aux_templates,
         use_specialist=use_specialist,
+        direct_lgb_params=direct_lgb_params,
+        allocation_lgb_params=allocation_lgb_params,
+        allocation_xgb_params=allocation_xgb_params,
+        revenue_share_xgb_params=revenue_share_xgb_params,
+        cogs_share_xgb_params=cogs_share_xgb_params,
+        allocation_model_type=allocation_model_type,
+        direct_blend=direct_blend,
+        allocation_blend=allocation_blend,
     ).fit(load_sales())
 
 
@@ -394,7 +503,24 @@ def generate_submission(
     return submission
 
 
-def run_training_pipeline(use_aux_templates: bool = True, use_specialist: bool = True) -> dict[str, object]:
+def run_training_pipeline(
+    use_aux_templates: bool = True,
+    use_specialist: bool = True,
+    direct_lgb_params: dict | None = None,
+    allocation_lgb_params: dict | None = None,
+    allocation_xgb_params: dict | None = None,
+    revenue_share_xgb_params: dict | None = None,
+    cogs_share_xgb_params: dict | None = None,
+    allocation_model_type: str = "lightgbm",
+    direct_blend: dict[str, float] | None = None,
+    allocation_blend: dict[str, float] | None = None,
+    submission_filename: str = "submission.csv",
+    uncalibrated_submission_filename: str = "submission_uncalibrated.csv",
+    model_filename: str = "forecast_pipeline.joblib",
+    summary_filename: str = "summary.json",
+    fold_metrics_filename: str = "fold_metrics.csv",
+    cv_predictions_filename: str = "cv_predictions.csv",
+) -> dict[str, object]:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     SUBMISSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -403,6 +529,14 @@ def run_training_pipeline(use_aux_templates: bool = True, use_specialist: bool =
     fold_metrics, cv_predictions = run_backtest(
         use_aux_templates=use_aux_templates,
         use_specialist=use_specialist,
+        direct_lgb_params=direct_lgb_params,
+        allocation_lgb_params=allocation_lgb_params,
+        allocation_xgb_params=allocation_xgb_params,
+        revenue_share_xgb_params=revenue_share_xgb_params,
+        cogs_share_xgb_params=cogs_share_xgb_params,
+        allocation_model_type=allocation_model_type,
+        direct_blend=direct_blend,
+        allocation_blend=allocation_blend,
     )
     calibration = calibrate_from_cv(cv_predictions)
     calibrated_cv_predictions = apply_calibration(cv_predictions, calibration)
@@ -415,8 +549,16 @@ def run_training_pipeline(use_aux_templates: bool = True, use_specialist: bool =
     final_pipeline = fit_final_pipeline(
         use_aux_templates=use_aux_templates,
         use_specialist=use_specialist,
+        direct_lgb_params=direct_lgb_params,
+        allocation_lgb_params=allocation_lgb_params,
+        allocation_xgb_params=allocation_xgb_params,
+        revenue_share_xgb_params=revenue_share_xgb_params,
+        cogs_share_xgb_params=cogs_share_xgb_params,
+        allocation_model_type=allocation_model_type,
+        direct_blend=direct_blend,
+        allocation_blend=allocation_blend,
     )
-    final_pipeline.save(MODELS_DIR / "forecast_pipeline.joblib")
+    final_pipeline.save(MODELS_DIR / model_filename)
     save_processed_features(final_pipeline)
 
     revenue_importance = save_feature_importance(
@@ -431,22 +573,24 @@ def run_training_pipeline(use_aux_templates: bool = True, use_specialist: bool =
     )
 
     uncalibrated_submission = generate_submission(final_pipeline, calibration=None)
-    uncalibrated_submission.to_csv(SUBMISSIONS_DIR / "submission_uncalibrated.csv", index=False)
+    uncalibrated_submission.to_csv(SUBMISSIONS_DIR / uncalibrated_submission_filename, index=False)
 
     submission = generate_submission(final_pipeline, calibration=calibration)
-    submission.to_csv(SUBMISSIONS_DIR / "submission.csv", index=False)
+    submission.to_csv(SUBMISSIONS_DIR / submission_filename, index=False)
 
-    fold_metrics.to_csv(REPORTS_DIR / "fold_metrics.csv", index=False)
-    cv_predictions.to_csv(REPORTS_DIR / "cv_predictions.csv", index=False)
+    fold_metrics.to_csv(REPORTS_DIR / fold_metrics_filename, index=False)
+    cv_predictions.to_csv(REPORTS_DIR / cv_predictions_filename, index=False)
     summary = {
         "fold_metrics_mean": fold_metrics.mean(numeric_only=True).to_dict(),
         "calibrated_fold_metrics_mean": calibrated_fold_metrics.mean(numeric_only=True).to_dict(),
         "calibration": calibration,
         "revenue_top_features": revenue_importance.head(10).to_dict(orient="records"),
         "cogs_top_features": cogs_importance.head(10).to_dict(orient="records"),
-        "submission_path": str(SUBMISSIONS_DIR / "submission.csv"),
-        "model_path": str(MODELS_DIR / "forecast_pipeline.joblib"),
+        "submission_path": str(SUBMISSIONS_DIR / submission_filename),
+        "uncalibrated_submission_path": str(SUBMISSIONS_DIR / uncalibrated_submission_filename),
+        "model_path": str(MODELS_DIR / model_filename),
+        "allocation_model_type": allocation_model_type,
     }
-    with open(REPORTS_DIR / "summary.json", "w", encoding="ascii") as handle:
+    with open(REPORTS_DIR / summary_filename, "w", encoding="ascii") as handle:
         json.dump(summary, handle, indent=2)
     return summary

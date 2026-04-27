@@ -69,19 +69,77 @@ VN_FIXED_HOLIDAYS = {
     "christmas": (12, 25),
 }
 
-REVENUE_LGB_PARAMS = {
+DIRECT_LGB_PARAMS = {
     "objective": "regression",
     "n_estimators": 500,
     "learning_rate": 0.03,
     "num_leaves": 63,
-    "min_child_samples": 24,
+    "min_child_samples": 28,
     "subsample": 0.9,
     "colsample_bytree": 0.85,
-    "reg_lambda": 0.5,
+    "reg_lambda": 0.8,
     "random_state": RANDOM_SEED,
     "n_jobs": -1,
     "verbosity": -1,
 }
+
+ALLOCATION_LGB_PARAMS = {
+    "objective": "regression",
+    "n_estimators": 650,
+    "learning_rate": 0.025,
+    "num_leaves": 47,
+    "min_child_samples": 18,
+    "subsample": 0.9,
+    "colsample_bytree": 0.85,
+    "reg_lambda": 0.75,
+    "random_state": RANDOM_SEED,
+    "n_jobs": -1,
+    "verbosity": -1,
+}
+
+ALLOCATION_XGB_PARAMS = {
+    "objective": "reg:squarederror",
+    "n_estimators": 700,
+    "learning_rate": 0.03,
+    "max_depth": 6,
+    "min_child_weight": 2.0,
+    "subsample": 0.9,
+    "colsample_bytree": 0.85,
+    "reg_lambda": 1.0,
+    "random_state": RANDOM_SEED,
+    "n_jobs": -1,
+    "verbosity": 0,
+}
+
+REVENUE_SHARE_XGB_PARAMS = {
+    "objective": "reg:squarederror",
+    "n_estimators": 750,
+    "learning_rate": 0.03,
+    "max_depth": 6,
+    "min_child_weight": 1.5,
+    "subsample": 0.9,
+    "colsample_bytree": 0.85,
+    "reg_lambda": 0.8,
+    "random_state": RANDOM_SEED,
+    "n_jobs": -1,
+    "verbosity": 0,
+}
+
+COGS_SHARE_XGB_PARAMS = {
+    "objective": "reg:squarederror",
+    "n_estimators": 650,
+    "learning_rate": 0.025,
+    "max_depth": 5,
+    "min_child_weight": 3.0,
+    "subsample": 0.9,
+    "colsample_bytree": 0.8,
+    "reg_lambda": 1.4,
+    "random_state": RANDOM_SEED,
+    "n_jobs": -1,
+    "verbosity": 0,
+}
+
+REVENUE_LGB_PARAMS = DIRECT_LGB_PARAMS
 
 RATIO_LGB_PARAMS = {
     "objective": "regression",
@@ -118,8 +176,8 @@ DIRECT_BLEND = {
 }
 
 ALLOCATION_BLEND = {
-    "revenue": 0.6,
-    "cogs": 0.4,
+    "revenue": 0.68,
+    "cogs": 0.45,
 }
 
 SPECIALIST_MIN_ROWS = 180
