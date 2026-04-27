@@ -39,6 +39,7 @@ class FeatureBuilder:
     history_end: pd.Timestamp | None = None
     aux_observations: pd.DataFrame | None = None
     target_profile_tables: dict[str, pd.DataFrame] = field(default_factory=dict)
+    target_profile_keys: dict[str, list[str]] = field(default_factory=dict)
     aux_profile_tables: dict[str, pd.DataFrame] = field(default_factory=dict)
     static_feature_columns: list[str] = field(default_factory=list)
     feature_columns: list[str] = field(default_factory=list)
@@ -74,6 +75,23 @@ class FeatureBuilder:
             .merge(history_sales, on="Date", how="left")
         )
         history["ratio"] = history["COGS"] / history["Revenue"]
+        history["revenue_quarter_share"] = history["Revenue"] / history.groupby(["year", "quarter"])["Revenue"].transform(
+            "sum"
+        ).replace(0.0, np.nan)
+        history["cogs_quarter_share"] = history["COGS"] / history.groupby(["year", "quarter"])["COGS"].transform("sum").replace(
+            0.0,
+            np.nan,
+        )
+        history["revenue_month_share"] = history["Revenue"] / history.groupby(["year", "month"])["Revenue"].transform("sum").replace(
+            0.0,
+            np.nan,
+        )
+        history["cogs_month_share"] = history["COGS"] / history.groupby(["year", "month"])["COGS"].transform("sum").replace(
+            0.0,
+            np.nan,
+        )
+        history["quarter_progress"] = history["day_of_quarter"] / history["days_in_quarter"].replace(0.0, np.nan)
+        history["month_progress"] = history["day"] / history["days_in_month"].replace(0.0, np.nan)
 
         target_specs = {
             "template_revenue_dom": ("Revenue", ["day"]),
@@ -84,7 +102,14 @@ class FeatureBuilder:
             "template_ratio_dte": ("ratio", ["days_to_month_end"]),
             "template_ratio_month_dow": ("ratio", ["month", "dow"]),
             "template_ratio_doy": ("ratio", ["month", "day"]),
+            "template_revenue_qshare_doq": ("revenue_quarter_share", ["quarter", "day_of_quarter"]),
+            "template_cogs_qshare_doq": ("cogs_quarter_share", ["quarter", "day_of_quarter"]),
+            "template_revenue_qshare_month_pos": ("revenue_quarter_share", ["quarter", "month_of_quarter", "day"]),
+            "template_cogs_qshare_month_pos": ("cogs_quarter_share", ["quarter", "month_of_quarter", "day"]),
+            "template_revenue_mshare_dom": ("revenue_month_share", ["month", "day"]),
+            "template_cogs_mshare_dom": ("cogs_month_share", ["month", "day"]),
         }
+        self.target_profile_keys = {name: keys for name, (_, keys) in target_specs.items()}
         self.target_profile_tables = {
             name: history.groupby(keys, as_index=False)[value].mean()
             for name, (value, keys) in target_specs.items()
@@ -106,14 +131,7 @@ class FeatureBuilder:
         frame = frame.merge(build_daily_promo_features(frame["Date"], self.history_end), on="Date", how="left")
 
         for name, table in self.target_profile_tables.items():
-            if name.endswith("_month_dow"):
-                keys = ["month", "dow"]
-            elif name.endswith("_doy"):
-                keys = ["month", "day"]
-            elif name.endswith("_dte"):
-                keys = ["days_to_month_end"]
-            else:
-                keys = ["day"]
+            keys = self.target_profile_keys[name]
             frame = frame.merge(table.rename(columns={table.columns[-1]: name}), on=keys, how="left")
 
         for column, table in self.aux_profile_tables.items():
@@ -134,6 +152,24 @@ class FeatureBuilder:
             frame["is_first_3_days"] + frame["is_last_3_days"]
         )
         frame["promo_tet_pressure"] = frame["promo_weighted_discount"] * frame["is_tet_window_14"]
+        frame["quarter_progress"] = frame["day_of_quarter"] / frame["days_in_quarter"].replace(0.0, np.nan)
+        frame["days_to_quarter_end_norm"] = frame["days_to_quarter_end"] / frame["days_in_quarter"].replace(0.0, np.nan)
+        frame["month_progress"] = frame["day"] / frame["days_in_month"].replace(0.0, np.nan)
+        frame["week_of_quarter_norm"] = frame["week_of_quarter"] / ((frame["days_in_quarter"] - 1) // 7 + 1).replace(0.0, np.nan)
+        frame["is_q2"] = (frame["quarter"] == 2).astype(float)
+        frame["is_q3"] = (frame["quarter"] == 3).astype(float)
+        frame["is_q4"] = (frame["quarter"] == 4).astype(float)
+        frame["promo_q2_pressure"] = frame["promo_weighted_discount"] * frame["is_q2"]
+        frame["promo_q3_pressure"] = frame["promo_weighted_discount"] * frame["is_q3"]
+        frame["promo_month_progress"] = frame["promo_weighted_discount"] * frame["month_progress"]
+        frame["promo_quarter_progress"] = frame["promo_weighted_discount"] * frame["quarter_progress"]
+        frame["q3_month_end_pressure"] = frame["is_q3"] * frame["is_last_3_days"]
+        frame["q3_month_start_pressure"] = frame["is_q3"] * frame["is_first_3_days"]
+        frame["q3_ratio_template"] = frame["is_q3"] * frame["template_ratio_doy"]
+        frame["q3_cogs_share_template"] = frame["is_q3"] * frame["template_cogs_qshare_doq"]
+        frame["month_end_share_pressure"] = frame["is_last_3_days"] * frame["template_revenue_qshare_doq"]
+        frame["month_start_share_pressure"] = frame["is_first_3_days"] * frame["template_revenue_qshare_doq"]
+        frame = frame.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
         self.static_feature_columns = [column for column in frame.columns if column != "Date"]
         return frame
